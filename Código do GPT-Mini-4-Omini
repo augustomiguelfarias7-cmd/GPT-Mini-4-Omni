@@ -3,23 +3,22 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset, concatenate_datasets
 import numpy as np
-from PIL import Image  # Para visualizar imagens
-import matplotlib.pyplot as plt  # Para exibir imagens em notebooks ou apps
+from PIL import Image
+import matplotlib.pyplot as plt
+import torchvision.transforms as T
 import os
 
 # ============================================
-# Tokenizer multilíngue completo
+# Tokenizer multilíngue completo (80k tokens)
 # ============================================
 class SimpleTokenizer:
-    def __init__(self, vocab_size=50000):
-        # Vocabulário simples, substitui palavras desconhecidas por [UNK]
+    def __init__(self, vocab_size=80000):
         self.vocab = {f"TOKEN_{i}": i for i in range(vocab_size)}
         self.vocab["[PAD]"] = 0
         self.vocab["[UNK]"] = 1
         self.vocab_size = len(self.vocab)
 
     def encode(self, text):
-        # Divide por espaços e converte em ids
         return [self.vocab.get(tok, self.vocab["[UNK]"]) for tok in text.split()]
 
     def decode(self, ids):
@@ -48,13 +47,12 @@ class AdvancedTransformerBlock(nn.Module):
         return x
 
 # ============================================
-# VAE para imagens 12K (com tiling e pixel progressivo)
+# VAE para imagens
 # ============================================
 class ImageVAE(nn.Module):
     def __init__(self, dim=2048, tile_size=1024):
         super().__init__()
         self.tile_size = tile_size
-        # Encoder
         self.encoder = nn.Sequential(
             nn.Conv2d(3, dim, 4, 2, 1), nn.ReLU(),
             nn.Conv2d(dim, dim*2, 4, 2, 1), nn.ReLU(),
@@ -62,7 +60,6 @@ class ImageVAE(nn.Module):
             nn.Conv2d(dim*4, dim*8, 4, 2, 1), nn.ReLU()
         )
         self.to_latent = nn.Conv2d(dim*8, dim, 1)
-        # Decoder
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(dim, dim*8, 4, 2, 1), nn.ReLU(),
             nn.ConvTranspose2d(dim*8, dim*4, 4, 2, 1), nn.ReLU(),
@@ -77,75 +74,81 @@ class ImageVAE(nn.Module):
     def decode(self, z):
         return self.decoder(z)
 
-    # Geração progressiva de imagem 12K usando tiles
-    def generate_12k(self, device, show_progress=False):
-        full_size = 12288
-        n_tiles = full_size // self.tile_size
-        canvas = torch.zeros((3, full_size, full_size), device=device)
-        for i in range(n_tiles):
-            for j in range(n_tiles):
-                # Geração inicial em resolução menor
-                tile = torch.rand((1, 3, self.tile_size, self.tile_size), device=device)
-                latent = self.encode(tile)
-                recon = self.decode(latent)
-                canvas[:, i*self.tile_size:(i+1)*self.tile_size,
-                          j*self.tile_size:(j+1)*self.tile_size] = recon[0]
-                if show_progress:
-                    print(f"Tile {i},{j} gerado")
-        return canvas
-
-    # Função para exibir imagem no PIL/matplotlib
     def show_image(self, tensor):
-        img = tensor.detach().cpu().clamp(0,1).permute(1,2,0).numpy()  # (H,W,C)
+        img = tensor.detach().cpu().clamp(0,1).permute(1,2,0).numpy()
         plt.figure(figsize=(12,12))
         plt.imshow(img)
         plt.axis('off')
         plt.show()
 
 # ============================================
-# Dataset multimodal completo
+# Dataset multimodal real
 # ============================================
 class GPTMiniOmniDataset(Dataset):
     def __init__(self, tokenizer, max_len=512):
         self.tokenizer = tokenizer
         self.max_len = max_len
 
-        # Wikipedia em vários idiomas
+        # Texto
         langs = ["pt","en","fr","es","de","it","ru","zh","ja","ko"]
         wiki_datasets = [load_dataset("wikipedia", f"20220301.{lang}", split="train") for lang in langs]
         self.text_dataset = concatenate_datasets(wiki_datasets)
 
-        # Dataset de código completo
+        # Código
         code_langs = ["python","javascript","java","cpp","c"]
         code_datasets = [load_dataset("bigcode/the-stack-dedup", data_dir=f"data/{lang}", split="train") for lang in code_langs]
         self.code_dataset = concatenate_datasets(code_datasets)
 
-        # Placeholders multimodal
-        self.num_images = 1000
-        self.num_videos = 200
+        # Imagens reais
+        self.image_dataset = load_dataset("coco", "2017", split="train")  # COCO 2017
+        self.transform_image = T.Compose([
+            T.Resize((1024,1024)),
+            T.ToTensor()
+        ])
+
+        # Vídeos reais
+        self.video_dataset = load_dataset("ucf101", split="train")  # UCF101
+        self.transform_video = T.Compose([
+            T.Resize((256,256)),
+            T.ToTensor()
+        ])
+
+        # Áudio placeholders
         self.num_audio = 500
 
     def __len__(self):
-        return max(len(self.text_dataset), len(self.code_dataset), self.num_images, self.num_videos, self.num_audio)
+        return max(len(self.text_dataset), len(self.code_dataset), len(self.image_dataset), len(self.video_dataset), self.num_audio)
 
     def __getitem__(self, idx):
         # Texto
         text_sample = self.text_dataset[idx % len(self.text_dataset)]["text"]
         text_tokens = torch.tensor(self.tokenizer.encode(text_sample)[:self.max_len], dtype=torch.long)
+
         # Código
         code_sample = self.code_dataset[idx % len(self.code_dataset)]["code"]
         code_tokens = torch.tensor(self.tokenizer.encode(code_sample)[:self.max_len], dtype=torch.long)
-        # Imagem, vídeo e áudio (placeholder)
-        image_tensor = torch.rand((3, 1024, 1024))
-        video_tensor = torch.rand((8, 3, 256, 256))
+
+        # Imagem
+        img = self.image_dataset[idx % len(self.image_dataset)]["image"]
+        if isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        image_tensor = self.transform_image(img)
+
+        # Vídeo
+        video_data = self.video_dataset[idx % len(self.video_dataset)]["video"]
+        frames = torch.stack([self.transform_video(Image.fromarray(frame)) for frame in video_data["frames"][:8]])
+        video_tensor = frames  # 8 frames por vídeo
+
+        # Áudio placeholder
         audio_tensor = torch.rand((256, 1024))
+
         return text_tokens, code_tokens, image_tensor, video_tensor, audio_tensor
 
 # ============================================
-# GPT-Mini-4-Omni (multimodal, treinável)
+# GPT-Mini-4-Omni
 # ============================================
 class GPTMini4Omni(nn.Module):
-    def __init__(self, vocab_size=50000, embed_dim=2048, depth=24, num_heads=16):
+    def __init__(self, vocab_size=80000, embed_dim=2048, depth=24, num_heads=16):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_embedding = nn.Parameter(torch.randn(1, 512, embed_dim))
@@ -155,7 +158,6 @@ class GPTMini4Omni(nn.Module):
         self.image_vae = ImageVAE(dim=embed_dim//2)
         self.audio_fc = nn.Linear(1024, embed_dim)
 
-    # Forward multimodal
     def forward_text(self, input_ids):
         x = self.token_embedding(input_ids) + self.pos_embedding[:, :input_ids.size(1)]
         for block in self.transformer_blocks:
@@ -164,8 +166,8 @@ class GPTMini4Omni(nn.Module):
         return self.text_head(x)
 
     def forward_image(self, image_tensor):
-        latent = self.image_vae.encode(image_tensor)
-        return self.image_vae.decode(latent)
+        latent = self.image_vae.encode(image_tensor.unsqueeze(0))
+        return self.image_vae.decode(latent)[0]
 
     def forward_audio(self, audio_tensor):
         return self.audio_fc(audio_tensor.mean(dim=0, keepdim=True))
@@ -176,14 +178,13 @@ class GPTMini4Omni(nn.Module):
         processed = self.forward_image(video_tensor)
         return processed.view(B, F, C, H, W)
 
-    # Sentimento
     def analyze_user_sentiment(self, text_input):
         if any(word in text_input.lower() for word in ["triste", "depress", "chateado", "angry"]):
             return "😢 Parece que você está triste. Que tal um conteúdo motivacional?"
         return "🙂 Tudo certo!"
 
 # ============================================
-# Treinamento completo multimodal 100%
+# Treinamento completo
 # ============================================
 def train_full(epochs=1, batch_size=1, show_progress=False):
     tokenizer = SimpleTokenizer()
@@ -235,10 +236,9 @@ if __name__ == "__main__":
     model = train_full(epochs=1, batch_size=1, show_progress=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    generated_12k = model.image_vae.generate_12k(device, show_progress=True)
-    print("✅ Imagem 12K gerada com shape:", generated_12k.shape)
-    # Mostrar a imagem gerada
-    model.image_vae.show_image(generated_12k)
+    sample_image = torch.rand((3,1024,1024)).to(device)
+    output_image = model.forward_image(sample_image)
+    model.image_vae.show_image(output_image)
 
     msg = "Estou muito chateado hoje"
     print(model.analyze_user_sentiment(msg))
