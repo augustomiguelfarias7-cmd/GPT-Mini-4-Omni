@@ -1,6 +1,6 @@
 GPT-Mini-4-Omni
 
-Um modelo multimodal experimental que combina linguagem, código, imagens, áudio e vídeo em uma única arquitetura.
+Um modelo multimodal que combina linguagem, código, imagens, áudio e vídeo em uma única arquitetura.
 Este projeto é inspirado em modelos avançados como GPT, mas implementado de forma simplificada e aberta para estudo.
 
 🚀 Recursos principais
